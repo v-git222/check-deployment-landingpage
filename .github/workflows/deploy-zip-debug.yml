@@ -1,4 +1,4 @@
-name: Deploy site.zip to GitHub Pages (no secrets)
+name: Deploy site.zip to GitHub Pages (robust)
 
 on:
   workflow_dispatch:
@@ -19,64 +19,171 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check system info
+      - name: Runner info
         run: |
-          echo "Runner: $(uname -a)"
-          echo "Current directory: $(pwd)"
+          echo "USER: $(whoami)"
+          echo "PWD: $(pwd)"
+          echo "Root listing:"
           ls -la
 
-      - name: Ensure unzip is installed
+      - name: Ensure Python present (for extractor) and unzip helper
         run: |
+          echo "Python version:"
+          python3 --version || python --version
           if ! command -v unzip >/dev/null 2>&1; then
-            echo "Installing unzip..."
+            echo "Installing unzip (just in case)"
             sudo apt-get update -y
             sudo apt-get install -y unzip
-          else
-            echo "unzip already installed"
           fi
 
-      - name: Verify site.zip presence
+      - name: Confirm site.zip exists and show zip listing
         run: |
           if [ ! -f "./site.zip" ]; then
-            echo "❌ site.zip not found at repo root."
-            exit 1
-          fi
-          echo "✅ site.zip found."
-          unzip -l site.zip | head -n 20
-
-      - name: Extract site.zip to public
-        run: |
-          rm -rf public || true
-          mkdir public
-          unzip -oq site.zip -d public
-
-          echo "Contents of public/:"
-          find public -maxdepth 2 -print
-
-          # Handle nested folder (common zip issue)
-          if [ ! -f public/index.html ]; then
-            inner_dir=$(find public -mindepth 1 -maxdepth 1 -type d | head -n 1)
-            if [ -n "$inner_dir" ]; then
-              echo "Flattening nested folder: $inner_dir"
-              mv "$inner_dir"/* public/ 2>/dev/null || true
-              mv "$inner_dir"/.[!.]* public/ 2>/dev/null || true
-              rmdir "$inner_dir" 2>/dev/null || true
-            fi
-          fi
-
-          if [ ! -f public/index.html ]; then
-            echo "❌ index.html not found after extraction."
-            find public -maxdepth 3 -print
+            echo "ERROR: site.zip not found at repo root. Commit site.zip to repo root or modify workflow to download it."
             exit 2
           fi
+          echo "site.zip listing (head):"
+          unzip -l site.zip | sed -n '1,200p' || true
 
-          echo "✅ index.html found in public/"
+      - name: Extract site.zip to public (robust Python extractor)
+        id: extract_python
+        run: |
+          python3 - <<'PY'
+          import zipfile, os, sys, shutil
 
-      - name: Upload GitHub Pages artifact
+          root = os.getcwd()
+          zip_path = os.path.join(root, "site.zip")
+          out_dir = os.path.join(root, "public")
+
+          if not os.path.isfile(zip_path):
+              print("ERROR: site.zip not found at repo root.")
+              sys.exit(2)
+
+          # remove old public dir
+          if os.path.isdir(out_dir):
+              shutil.rmtree(out_dir)
+          os.makedirs(out_dir, exist_ok=True)
+
+          z = zipfile.ZipFile(zip_path, "r")
+          names = z.namelist()
+          print("Zip contains %d entries" % len(names))
+
+          def safe_join(base, *parts):
+              path = os.path.normpath(os.path.join(base, *parts))
+              base_abs = os.path.abspath(base)
+              path_abs = os.path.abspath(path)
+              if not path_abs.startswith(base_abs):
+                  raise Exception("Path traversal detected: %s" % path_abs)
+              return path
+
+          for member in names:
+              member_fixed = member.replace("\\", "/")
+              member_fixed = member_fixed.lstrip("./")
+              if member_fixed == "" or member_fixed.endswith("/"):
+                  # directory entries handled by file creation below
+                  pass
+
+              parts = [p for p in member_fixed.split("/") if p != ""]
+              if not parts:
+                  continue
+
+              dest_path = safe_join(out_dir, *parts)
+              dest_dir = os.path.dirname(dest_path)
+              if dest_dir and not os.path.isdir(dest_dir):
+                  os.makedirs(dest_dir, exist_ok=True)
+
+              if member_fixed.endswith("/"):
+                  continue
+
+              # extract file content
+              with z.open(member) as src, open(dest_path, "wb") as dst:
+                  shutil.copyfileobj(src, dst)
+
+          z.close()
+
+          # print a short tree
+          printed = 0
+          for root_dir, dirs, files in os.walk(out_dir):
+              level = root_dir.replace(out_dir, "").count(os.sep)
+              indent = " " * 2 * level
+              print(f"{indent}{os.path.basename(root_dir)}/")
+              for f in files[:50]:
+                  print(f"{indent}  - {f}")
+              printed += 1
+              if printed >= 6:
+                  break
+
+          # find index.html anywhere
+          def find_index(base):
+              for dirpath, _, files in os.walk(base):
+                  for f in files:
+                      if f.lower() == "index.html":
+                          return os.path.join(dirpath, f)
+              return None
+
+          idx = find_index(out_dir)
+          if not idx:
+              print("ERROR: No index.html found anywhere under public/")
+              sys.exit(3)
+
+          print("Found index at:", idx)
+
+          # if index at public root, success
+          if os.path.isfile(os.path.join(out_dir, "index.html")):
+              print("index.html is at public root — no flattening needed")
+              sys.exit(0)
+
+          # if not, check for exactly one top-level directory to flatten
+          root_entries = [p for p in os.listdir(out_dir) if p not in ('.', '..')]
+          dir_entries = [p for p in root_entries if os.path.isdir(os.path.join(out_dir, p))]
+          if len(dir_entries) == 1 and len(root_entries) == 1:
+              single = os.path.join(out_dir, dir_entries[0])
+              print("Single top-level folder detected:", single)
+              for name in os.listdir(single):
+                  src = os.path.join(single, name)
+                  dst = os.path.join(out_dir, name)
+                  if os.path.exists(dst):
+                      if os.path.isdir(dst):
+                          shutil.rmtree(dst)
+                      else:
+                          os.remove(dst)
+                  shutil.move(src, dst)
+              try:
+                  os.rmdir(single)
+              except Exception:
+                  pass
+
+              if os.path.isfile(os.path.join(out_dir, "index.html")):
+                  print("index.html now at public root after flattening")
+                  sys.exit(0)
+              else:
+                  print("ERROR: index.html still not found after flattening")
+                  sys.exit(4)
+          else:
+              print("Multiple or zero top-level items; cannot auto-flatten. Showing deeper tree for debug:")
+              for dirpath, dirs, files in os.walk(out_dir):
+                  print(dirpath)
+                  for f in files:
+                      print("  ", f)
+              sys.exit(5)
+          PY
+
+      - name: Final public check
+        run: |
+          echo "Final public listing (top):"
+          ls -la public | sed -n '1,200p' || true
+          if [ -f public/index.html ]; then
+            echo "OK: index.html present"
+          else
+            echo "MISSING index.html; aborting"
+            exit 6
+          fi
+
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
       - name: Deploy to GitHub Pages
-        id: deploy
+        id: deployment
         uses: actions/deploy-pages@v4
