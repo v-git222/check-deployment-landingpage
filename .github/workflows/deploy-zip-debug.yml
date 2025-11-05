@@ -26,14 +26,13 @@ jobs:
           echo "Root listing:"
           ls -la
 
-      - name: Ensure Python present (for extractor) and unzip helper
+      - name: Ensure Python and unzip helper
         run: |
           echo "Python version:"
           python3 --version || python --version
           if ! command -v unzip >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y unzip
-          fi
 
       - name: Confirm dashboard-build-db.zip exists and show zip listing
         run: |
@@ -44,8 +43,8 @@ jobs:
           echo "📦 dashboard-build-db.zip listing (head):"
           unzip -l dashboard-build-db.zip | sed -n '1,200p' || true
 
-      - name: Extract dashboard-build-db.zip to public (robust Python extractor)
-        id: extract_python
+      - name: Extract only dashboard app to public
+        id: extract_dashboard
         run: |
           python3 - <<'PY'
           import zipfile, os, sys, shutil
@@ -54,81 +53,42 @@ jobs:
           zip_path = os.path.join(root, "dashboard-build-db.zip")
           out_dir = os.path.join(root, "public")
 
-          if not os.path.isfile(zip_path):
-              print("ERROR: dashboard-build-db.zip not found at repo root.")
-              sys.exit(2)
-
           if os.path.isdir(out_dir):
               shutil.rmtree(out_dir)
           os.makedirs(out_dir, exist_ok=True)
 
-          z = zipfile.ZipFile(zip_path, "r")
-          names = z.namelist()
-          print("Zip contains %d entries" % len(names))
+          with zipfile.ZipFile(zip_path, "r") as z:
+              # Extract all first
+              z.extractall(out_dir)
 
-          def safe_join(base, *parts):
-              path = os.path.normpath(os.path.join(base, *parts))
-              base_abs = os.path.abspath(base)
-              path_abs = os.path.abspath(path)
-              if not path_abs.startswith(base_abs):
-                  raise Exception("Path traversal detected: %s" % path_abs)
-              return path
+          # Find dashboard folder
+          dashboard_folder = None
+          for entry in os.listdir(out_dir):
+              path = os.path.join(out_dir, entry)
+              if os.path.isdir(path) and "dashboard" in entry.lower():
+                  dashboard_folder = path
+                  break
 
-          for member in names:
-              member_fixed = member.replace("\\", "/").lstrip("./")
-              if member_fixed == "" or member_fixed.endswith("/"):
-                  continue
-              parts = [p for p in member_fixed.split("/") if p]
-              dest_path = safe_join(out_dir, *parts)
-              dest_dir = os.path.dirname(dest_path)
-              os.makedirs(dest_dir, exist_ok=True)
-              with z.open(member) as src, open(dest_path, "wb") as dst:
-                  shutil.copyfileobj(src, dst)
-          z.close()
-
-          def find_index(base):
-              for dirpath, _, files in os.walk(base):
-                  for f in files:
-                      if f.lower() == "index.html":
-                          return os.path.join(dirpath, f)
-              return None
-
-          idx = find_index(out_dir)
-          if not idx:
-              print("ERROR: No index.html found under public/")
+          if not dashboard_folder:
+              print("ERROR: No dashboard folder found inside ZIP")
               sys.exit(3)
 
-          print("Found index.html at:", idx)
-          if os.path.isfile(os.path.join(out_dir, "index.html")):
-              print("index.html at root — no flattening needed")
-              sys.exit(0)
+          # Move dashboard contents to root of public
+          for name in os.listdir(dashboard_folder):
+              src = os.path.join(dashboard_folder, name)
+              dst = os.path.join(out_dir, name)
+              if os.path.exists(dst):
+                  if os.path.isdir(dst): shutil.rmtree(dst)
+                  else: os.remove(dst)
+              shutil.move(src, dst)
+          shutil.rmtree(dashboard_folder)
 
-          root_entries = [p for p in os.listdir(out_dir) if p not in ('.', '..')]
-          dir_entries = [p for p in root_entries if os.path.isdir(os.path.join(out_dir, p))]
-          if len(dir_entries) == 1 and len(root_entries) == 1:
-              single = os.path.join(out_dir, dir_entries[0])
-              print("Flattening single top-level folder:", single)
-              for name in os.listdir(single):
-                  src = os.path.join(single, name)
-                  dst = os.path.join(out_dir, name)
-                  if os.path.exists(dst):
-                      if os.path.isdir(dst): shutil.rmtree(dst)
-                      else: os.remove(dst)
-                  shutil.move(src, dst)
-              os.rmdir(single)
-              if os.path.isfile(os.path.join(out_dir, "index.html")):
-                  print("index.html now at root after flattening")
-                  sys.exit(0)
-              else:
-                  print("Still missing index.html after flattening")
-                  sys.exit(4)
-          else:
-              print("Multiple or zero top-level items — cannot auto-flatten.")
-              for dirpath, dirs, files in os.walk(out_dir):
-                  print(dirpath)
-                  for f in files:
-                      print("  ", f)
-              sys.exit(5)
+          # Final check
+          if not os.path.isfile(os.path.join(out_dir, "index.html")):
+              print("ERROR: index.html missing after extraction")
+              sys.exit(4)
+          print("✅ Dashboard app ready in public/")
+
           PY
 
       - name: Final public check
@@ -140,7 +100,6 @@ jobs:
           else
             echo "❌ index.html missing; aborting"
             exit 6
-          fi
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
