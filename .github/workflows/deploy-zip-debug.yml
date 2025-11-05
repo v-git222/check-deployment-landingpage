@@ -1,4 +1,4 @@
-name: Deploy site.zip to GitHub Pages (robust)
+name: Deploy landingpage.zip to GitHub Pages (robust)
 
 on:
   workflow_dispatch:
@@ -36,30 +36,30 @@ jobs:
             sudo apt-get install -y unzip
           fi
 
-      - name: Confirm site.zip exists and show zip listing
+      - name: Confirm landingpage.zip exists and show zip listing
         run: |
-          if [ ! -f "./site.zip" ]; then
-            echo "ERROR: site.zip not found at repo root. Commit site.zip to repo root or modify workflow to download it."
+          if [ ! -f "./landingpage.zip" ]; then
+            echo "❌ ERROR: landingpage.zip not found at repo root."
+            echo "Commit landingpage.zip to the repo root before running this workflow."
             exit 2
           fi
-          echo "site.zip listing (head):"
-          unzip -l site.zip | sed -n '1,200p' || true
+          echo "📦 landingpage.zip listing (head):"
+          unzip -l landingpage.zip | sed -n '1,200p' || true
 
-      - name: Extract site.zip to public (robust Python extractor)
+      - name: Extract landingpage.zip to public (robust Python extractor)
         id: extract_python
         run: |
           python3 - <<'PY'
           import zipfile, os, sys, shutil
 
           root = os.getcwd()
-          zip_path = os.path.join(root, "site.zip")
+          zip_path = os.path.join(root, "landingpage.zip")
           out_dir = os.path.join(root, "public")
 
           if not os.path.isfile(zip_path):
-              print("ERROR: site.zip not found at repo root.")
+              print("ERROR: landingpage.zip not found at repo root.")
               sys.exit(2)
 
-          # remove old public dir
           if os.path.isdir(out_dir):
               shutil.rmtree(out_dir)
           os.makedirs(out_dir, exist_ok=True)
@@ -77,43 +77,17 @@ jobs:
               return path
 
           for member in names:
-              member_fixed = member.replace("\\", "/")
-              member_fixed = member_fixed.lstrip("./")
+              member_fixed = member.replace("\\", "/").lstrip("./")
               if member_fixed == "" or member_fixed.endswith("/"):
-                  # directory entries handled by file creation below
-                  pass
-
-              parts = [p for p in member_fixed.split("/") if p != ""]
-              if not parts:
                   continue
-
+              parts = [p for p in member_fixed.split("/") if p]
               dest_path = safe_join(out_dir, *parts)
               dest_dir = os.path.dirname(dest_path)
-              if dest_dir and not os.path.isdir(dest_dir):
-                  os.makedirs(dest_dir, exist_ok=True)
-
-              if member_fixed.endswith("/"):
-                  continue
-
-              # extract file content
+              os.makedirs(dest_dir, exist_ok=True)
               with z.open(member) as src, open(dest_path, "wb") as dst:
                   shutil.copyfileobj(src, dst)
-
           z.close()
 
-          # print a short tree
-          printed = 0
-          for root_dir, dirs, files in os.walk(out_dir):
-              level = root_dir.replace(out_dir, "").count(os.sep)
-              indent = " " * 2 * level
-              print(f"{indent}{os.path.basename(root_dir)}/")
-              for f in files[:50]:
-                  print(f"{indent}  - {f}")
-              printed += 1
-              if printed >= 6:
-                  break
-
-          # find index.html anywhere
           def find_index(base):
               for dirpath, _, files in os.walk(base):
                   for f in files:
@@ -123,44 +97,35 @@ jobs:
 
           idx = find_index(out_dir)
           if not idx:
-              print("ERROR: No index.html found anywhere under public/")
+              print("ERROR: No index.html found under public/")
               sys.exit(3)
 
-          print("Found index at:", idx)
-
-          # if index at public root, success
+          print("Found index.html at:", idx)
           if os.path.isfile(os.path.join(out_dir, "index.html")):
-              print("index.html is at public root — no flattening needed")
+              print("index.html at root — no flattening needed")
               sys.exit(0)
 
-          # if not, check for exactly one top-level directory to flatten
           root_entries = [p for p in os.listdir(out_dir) if p not in ('.', '..')]
           dir_entries = [p for p in root_entries if os.path.isdir(os.path.join(out_dir, p))]
           if len(dir_entries) == 1 and len(root_entries) == 1:
               single = os.path.join(out_dir, dir_entries[0])
-              print("Single top-level folder detected:", single)
+              print("Flattening single top-level folder:", single)
               for name in os.listdir(single):
                   src = os.path.join(single, name)
                   dst = os.path.join(out_dir, name)
                   if os.path.exists(dst):
-                      if os.path.isdir(dst):
-                          shutil.rmtree(dst)
-                      else:
-                          os.remove(dst)
+                      if os.path.isdir(dst): shutil.rmtree(dst)
+                      else: os.remove(dst)
                   shutil.move(src, dst)
-              try:
-                  os.rmdir(single)
-              except Exception:
-                  pass
-
+              os.rmdir(single)
               if os.path.isfile(os.path.join(out_dir, "index.html")):
-                  print("index.html now at public root after flattening")
+                  print("index.html now at root after flattening")
                   sys.exit(0)
               else:
-                  print("ERROR: index.html still not found after flattening")
+                  print("Still missing index.html after flattening")
                   sys.exit(4)
           else:
-              print("Multiple or zero top-level items; cannot auto-flatten. Showing deeper tree for debug:")
+              print("Multiple or zero top-level items — cannot auto-flatten.")
               for dirpath, dirs, files in os.walk(out_dir):
                   print(dirpath)
                   for f in files:
@@ -170,12 +135,12 @@ jobs:
 
       - name: Final public check
         run: |
-          echo "Final public listing (top):"
+          echo "Final public listing:"
           ls -la public | sed -n '1,200p' || true
           if [ -f public/index.html ]; then
-            echo "OK: index.html present"
+            echo "✅ index.html present"
           else
-            echo "MISSING index.html; aborting"
+            echo "❌ index.html missing; aborting"
             exit 6
           fi
 
