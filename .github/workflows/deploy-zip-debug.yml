@@ -1,0 +1,118 @@
+name: Deploy site.zip to GitHub Pages (debug)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show runner info
+        run: |
+          echo "USER: $(whoami)"
+          echo "PWD: $(pwd)"
+          echo "ls -la root:"
+          ls -la
+          echo "----------"
+
+      - name: Ensure unzip is available
+        run: |
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "unzip not found — installing"
+            sudo apt-get update -y
+            sudo apt-get install -y unzip
+          else
+            echo "unzip found: $(which unzip) $(unzip -v | head -n1)"
+          fi
+
+      - name: Confirm site.zip exists and show zip listing
+        run: |
+          echo "Listing repo root for site.zip:"
+          ls -la || true
+          if [ ! -f ./site.zip ]; then
+            echo "ERROR: site.zip is NOT present at repository root. Aborting."
+            echo "Make sure site.zip is committed to repo root or update workflow to download it."
+            exit 2
+          fi
+          echo "site.zip found. Contents:"
+          unzip -l site.zip | sed -n '1,200p'
+
+      - name: Unzip into public and show tree
+        id: unzip
+        run: |
+          rm -rf public || true
+          mkdir public
+          echo "Extracting site.zip -> public/"
+          unzip -oq site.zip -d public || { echo "unzip failed"; exit 3; }
+          echo "Initial public listing (top 200):"
+          ls -la public | sed -n '1,200p'
+          echo "Find index.html files (anywhere under public):"
+          find public -type f -iname 'index.html' -print || true
+          echo "Find top-level entries under public:"
+          find public -mindepth 1 -maxdepth 1 -print -exec ls -la {} \; || true
+
+          # If index is not at public root, flatten if single top-level folder exists
+          if [ -f public/index.html ]; then
+            echo "index.html exists at public root - no flatten needed"
+          else
+            # count top-level directories (excluding dotfiles)
+            items=(public/*)
+            count=${#items[@]}
+            echo "Top-level entry count under public = $count"
+            if [ $count -eq 1 ] && [ -d "${items[0]}" ]; then
+              echo "Single top-level directory detected: ${items[0]} — flattening its contents to public/"
+              shopt -s dotglob 2>/dev/null || true
+              mv -f "${items[0]}"/* public/ 2>/dev/null || true
+              mv -f "${items[0]}/".[!.]* public/ 2>/dev/null || true || true
+              rmdir "${items[0]}" || true
+              echo "After flattening:"
+              ls -la public | sed -n '1,200p'
+              if [ ! -f public/index.html ]; then
+                echo "ERROR: index.html still not found after flatten. Showing deeper tree:"
+                find public -maxdepth 4 -print
+                exit 4
+              fi
+            else
+              echo "No single top-level folder to flatten (or multiple items). Showing tree:"
+              find public -maxdepth 4 -print
+              if [ ! -f public/index.html ]; then
+                echo "ERROR: No index.html at root and cannot auto-flatten. Aborting."
+                exit 5
+              fi
+            fi
+          fi
+
+      - name: Optional: write CNAME if secret set
+        if: ${{ secrets.CUSTOM_DOMAIN != '' }}
+        run: |
+          echo "Writing CNAME..."
+          echo "${{ secrets.CUSTOM_DOMAIN }}" > public/CNAME
+          ls -la public | sed -n '1,200p'
+
+      - name: Final public listing (sanity)
+        run: |
+          echo "Final public/ top-level:"
+          ls -la public | sed -n '1,200p'
+          echo "Ensure index.html present:"
+          test -f public/index.html && echo "OK: index.html exists" || (echo "MISSING index.html" && exit 6)
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
